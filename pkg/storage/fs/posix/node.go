@@ -72,6 +72,7 @@ type Node struct {
 	Exists bool
 }
 
+// FIXME: get rid of this method
 func (n *Node) writeMetadata() (err error) {
 	//ensure ID has been generated
 	n.ID()
@@ -94,6 +95,18 @@ func (n *Node) writeMetadata() (err error) {
 	return
 }
 
+func (n *Node) writeMetadataMap(attribs map[string][]byte) (err error) {
+	n.ID()
+	nodePath := n.InternalPath()
+
+	for key, value := range attribs {
+		if err = xattr.Set(nodePath, key, value); err != nil {
+			return errors.Wrap(err, "posixfs: could not set attribute")
+		}
+	}
+	return nil
+}
+
 // ReadRecycleItem reads a recycle item as a node
 // TODO refactor the returned params into Node properties? would make all the path transformations go away...
 func ReadRecycleItem(ctx context.Context, lu *Lookup, key string) (n *Node, trashItem string, deletedNodePath string, origin string, err error) {
@@ -109,6 +122,7 @@ func ReadNode(ctx context.Context, lu *Lookup, id string) (n *Node, err error) {
 	if len(parts) != 2 {
 		return nil, errtypes.BadRequest("invalid file id")
 	}
+
 	command := []string{"find", filepath.Join(lu.Options.Root), "-inum", parts[0]}
 	out, err := exec.Command(command[0], command[1:]...).Output()
 	if err != nil {

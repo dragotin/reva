@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 
 	userv1beta1 "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
@@ -29,10 +30,8 @@ import (
 	v1beta11 "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	ocsconv "github.com/cs3org/reva/v2/pkg/conversions"
 	"github.com/cs3org/reva/v2/pkg/storage/utils/decomposedfs/metadata/prefixes"
-	"github.com/cs3org/reva/v2/pkg/storage/utils/decomposedfs/node"
 	"github.com/cs3org/reva/v2/pkg/utils"
 	"github.com/google/uuid"
-	"github.com/pkg/errors"
 )
 
 func (fs *posixfs) storageSpaceFromNode(ctx context.Context, n *Node, checkPermissions bool) (*provider.StorageSpace, error) {
@@ -94,7 +93,7 @@ func (fs *posixfs) CreateStorageSpace(ctx context.Context, req *provider.CreateS
 	// "everything is a resource" this is the unique ID for the Space resource.
 	spaceID := uuid.New().String()
 	// allow sending a space id
-	if reqSpaceID := utils.ReadPlainFromOpaque(req.Opaque, "spaceid"); reqSpaceID != "" {
+	if reqSpaceID := utils.ReadPlainFromOpaque(req.Opaque, "space_id"); reqSpaceID != "" {
 		spaceID = reqSpaceID
 	}
 	// allow sending a space description
@@ -109,69 +108,61 @@ func (fs *posixfs) CreateStorageSpace(ctx context.Context, req *provider.CreateS
 	// case root.Exists:
 	// 	return nil, errtypes.AlreadyExists("Posixfs: spaces: space already exists")
 	// }
-	owner := req.GetOwner().GetId()
+	owner := req.GetOwner()
+	oname := owner.GetUsername()
 
-	// create a directory node
-	root := Node{lu: fs.lu, id: spaceID}
-	if err := createNode(
-		&root,
-		&userv1beta1.UserId{
-			OpaqueId: owner.GetOpaqueId(),
-		},
-	); err != nil {
-		return nil, err
+	// check and/or create a directory node
+	rootDir := filepath.Join(fs.lu.Options.Root, req.Type, oname)
+	relRootDir := filepath.Join(req.Type, oname)
+	spaceRoot := &Node{lu: fs.lu, SpaceID: spaceID, owner: owner.GetId(), Dir: relRootDir, Name: "/"}
+
+	spaceRoot.SpaceRoot = spaceRoot
+
+	// if the root dir exists, it can be assumed that the space already exists
+	if _, err := os.Stat(rootDir); os.IsNotExist(err) {
+
+		// createNode creates the dir and writes some metadata.
+		// maybe there should be more metadata added, ie. OwnerIDAttr and such
+		if err := createNode(
+			spaceRoot,
+			&userv1beta1.UserId{
+				OpaqueId: owner.GetId().GetOpaqueId(),
+			},
+		); err != nil {
+			return nil, err
+		}
 	}
 
-	// root.SetType(provider.ResourceType_RESOURCE_TYPE_CONTAINER)
-	rootPath := root.InternalPath()
+	// now the directory exists in any case. Read the node and return the space type.
 
-	if err := os.MkdirAll(rootPath, 0700); err != nil {
-		return nil, errors.Wrap(err, "Posixfs: error creating node")
-	}
-
-	ownerType := req.GetOwner().Id.GetType()
-	ownerIdp := req.GetOwner().Id.GetIdp()
-	if req.GetOwner() != nil && owner != nil {
-		// root.SetOwner(req.GetOwner().GetId())
-	} else {
-		// root.SetOwner(&userv1beta1.UserId{OpaqueId: spaceID, Type: userv1beta1.UserType_USER_TYPE_SPACE_OWNER})
-	}
-
-	metadata := node.Attributes{}
-	metadata.SetString(prefixes.OwnerIDAttr, owner.GetOpaqueId())
-	metadata.SetString(prefixes.OwnerIDPAttr, ownerIdp)
-	metadata.SetString(prefixes.OwnerTypeAttr, utils.UserTypeToString(ownerType))
-
+	/*
+		ownerType := req.GetOwner().Id.GetType()
+		ownerIdp := req.GetOwner().Id.GetIdp()
+		if req.GetOwner() != nil && owner != nil {
+			// root.SetOwner(req.GetOwner().GetId())
+		} else {
+			// root.SetOwner(&userv1beta1.UserId{OpaqueId: spaceID, Type: userv1beta1.UserType_USER_TYPE_SPACE_OWNER})
+		}
+	*/
+	metadata := make(map[string][]byte)
+	metadata[prefixes.OwnerTypeAttr] = []byte(utils.UserTypeToString(owner.GetId().Type))
 	// always mark the space root node as the end of propagation
-	metadata.SetString(prefixes.PropagationAttr, "1")
-	metadata.SetString(prefixes.NameAttr, req.Name)
-	metadata.SetString(prefixes.SpaceNameAttr, req.Name)
-	// This space is empty so set initial treesize to 0
-	metadata.SetUInt64(prefixes.TreesizeAttr, 0)
+	metadata[prefixes.PropagationAttr] = []byte("1")
+	metadata[prefixes.NameAttr] = []byte(req.Name)
+	metadata[prefixes.SpaceNameAttr] = []byte(req.Name)
+	metadata[prefixes.TreesizeAttr] = []byte("0")
 
 	if req.Type != "" {
-		metadata.SetString(prefixes.SpaceTypeAttr, req.Type)
+		metadata[prefixes.SpaceTypeAttr] = []byte(req.Type)
 	}
-
-	// if q := req.GetQuota(); q != nil {
-	// set default space quota
-	// if fs.o.MaxQuota != quotaUnrestricted && q.GetQuotaMaxBytes() > fs.o.MaxQuota {
-	//	return nil, errtypes.BadRequest("decompsedFS: requested quota is higher than allowed")
-	// }
-	// metadata.SetInt64(prefixes.QuotaAttr, int64(q.QuotaMaxBytes))
-	// } else if fs.o.MaxQuota != quotaUnrestricted {
-	// If no quota was requested but a max quota was set then the the storage space has a quota
-	// of max quota.
-	// metadata.SetInt64(prefixes.QuotaAttr, int64(fs.o.MaxQuota))
-	//}
 
 	if description != "" {
-		metadata.SetString(prefixes.SpaceDescriptionAttr, description)
+		metadata[prefixes.SpaceDescriptionAttr] = []byte(description)
 	}
 
-	// if err := root.SetXattrsWithContext(ctx, metadata, true); err != nil {
-	//	return nil, err
-	// }
+	if err := spaceRoot.writeMetadataMap(metadata); err != nil {
+		return nil, err
+	}
 
 	// Write index
 	// err = fs.updateIndexes(ctx, &provider.Grantee{
@@ -201,7 +192,7 @@ func (fs *posixfs) CreateStorageSpace(ctx context.Context, req *provider.CreateS
 			return nil, err
 		}
 	}
-	space, err := fs.storageSpaceFromNode(ctx, &root, true)
+	space, err := fs.storageSpaceFromNode(ctx, spaceRoot, true)
 	if err != nil {
 		return nil, err
 	}

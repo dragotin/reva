@@ -164,5 +164,6 @@ func extractACEsFromAttrs(ctx context.Context, fsfn string, attrs []string) (ent
 }
 
 func (fs *posixfs) DenyGrant(ctx context.Context, ref *provider.Reference, grantee *provider.Grantee) error {
-	return fs.DenyGrant(ctx, ref, grantee)
+	// return fs.DenyGrant(ctx, ref, grantee)
+	return nil
 }
