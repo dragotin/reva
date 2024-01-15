@@ -238,10 +238,7 @@ func (fs *posixfs) NewUpload(ctx context.Context, info tusd.FileInfo) (upload tu
 	}
 	usr := ctxpkg.ContextMustGetUser(ctx)
 
-	owner, err := p.Owner()
-	if err != nil {
-		return nil, errors.Wrap(err, "posixfs: error determining owner")
-	}
+	owner := p.Owner()
 
 	info.Storage = map[string]string{
 		"Type":    "OCISStore",
@@ -488,10 +485,10 @@ func (upload *fileUpload) FinishUpload(ctx context.Context) (err error) {
 		Idp:      upload.info.Storage["OwnerIdp"],
 		OpaqueId: upload.info.Storage["OwnerId"],
 	}
-	err = n.writeMetadata()
-	if err != nil {
-		return errors.Wrap(err, "posixfs: could not write metadata")
-	}
+	// err = n.writeMetadata()
+	// if err != nil {
+	// 	return errors.Wrap(err, "posixfs: could not write metadata")
+	// }
 
 	// only delete the upload if it was successfully written to the storage
 	if err = os.Remove(upload.infoPath); err != nil {

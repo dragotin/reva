@@ -17,21 +17,35 @@ package posix
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	userv1beta1 "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
 	types "github.com/cs3org/go-cs3apis/cs3/types/v1beta1"
 	"github.com/cs3org/reva/v2/pkg/errtypes"
 	"github.com/cs3org/reva/v2/pkg/storagespace"
+	"github.com/pkg/errors"
+	"github.com/pkg/xattr"
 
 	v1beta11 "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	ocsconv "github.com/cs3org/reva/v2/pkg/conversions"
+	"github.com/cs3org/reva/v2/pkg/logger"
 	"github.com/cs3org/reva/v2/pkg/storage/utils/decomposedfs/metadata/prefixes"
 	"github.com/cs3org/reva/v2/pkg/utils"
 	"github.com/google/uuid"
+)
+
+const (
+	_spaceTypePersonal = "personal"
+	_spaceTypeProject  = "project"
+	spaceTypeShare     = "share"
+	spaceTypeAny       = "*"
+	spaceIDAny         = "*"
+
+	quotaUnrestricted = 0
 )
 
 func (fs *posixfs) storageSpaceFromNode(ctx context.Context, n *Node, checkPermissions bool) (*provider.StorageSpace, error) {
@@ -47,14 +61,11 @@ func (fs *posixfs) storageSpaceFromNode(ctx context.Context, n *Node, checkPermi
 		return nil, err
 	}
 	var sname string
-	// if sname, err = n.SpaceRoot.XattrString(ctx, prefixes.SpaceNameAttr); err != nil {
-	// FIXME: Is that a severe problem?
-	// sublog.Debug().Err(err).Msg("space does not have a name attribute")
-	// }
+	sname = n.Name
 
-	grantMapJSON, err := json.Marshal("")
-	grantExpirationMapJSON, err := json.Marshal("")
-	groupMapJSON, err := json.Marshal("")
+	grantMapJSON := []byte("{}")
+	grantExpirationMapJSON := []byte("{}")
+	groupMapJSON := []byte("{}")
 
 	space := &provider.StorageSpace{
 		Opaque: &types.Opaque{
@@ -78,7 +89,9 @@ func (fs *posixfs) storageSpaceFromNode(ctx context.Context, n *Node, checkPermi
 			SpaceId:  n.SpaceRoot.SpaceID,
 			OpaqueId: n.SpaceRoot.ID(),
 		},
-		Name: sname,
+		Name:  sname,
+		Owner: &userv1beta1.User{Id: n.Owner()},
+
 		// SpaceType is read from xattr below
 		// Mtime is set either as node.tmtime or as fi.mtime below
 	}
@@ -109,59 +122,68 @@ func (fs *posixfs) CreateStorageSpace(ctx context.Context, req *provider.CreateS
 	// 	return nil, errtypes.AlreadyExists("Posixfs: spaces: space already exists")
 	// }
 	owner := req.GetOwner()
-	oname := owner.GetUsername()
 
-	// check and/or create a directory node
-	rootDir := filepath.Join(fs.lu.Options.Root, req.Type, oname)
-	relRootDir := filepath.Join(req.Type, oname)
-	spaceRoot := &Node{lu: fs.lu, SpaceID: spaceID, owner: owner.GetId(), Dir: relRootDir, Name: "/"}
+	// Home node considers the user template
+	// spaceRoot, err := fs.lu.HomeNode(ctx)
+	// spaceRoot.SpaceID = spaceID
+	// spaceRoot.id = spaceID
+
+	// if err != nil {
+	//	return nil, err
+	// }
+
+	spaceRoot := &Node{lu: fs.lu, SpaceID: spaceID, owner: owner.GetId(), Dir: "personal", Name: "einstein"}
 
 	spaceRoot.SpaceRoot = spaceRoot
 
 	// if the root dir exists, it can be assumed that the space already exists
-	if _, err := os.Stat(rootDir); os.IsNotExist(err) {
+	if _, err := os.Stat(spaceRoot.InternalPath()); os.IsNotExist(err) {
+		if err = os.MkdirAll(spaceRoot.InternalPath(), 0700); err != nil {
+			return nil, errors.Wrap(err, "posixfs: error creating node")
+		}
 
-		// createNode creates the dir and writes some metadata.
-		// maybe there should be more metadata added, ie. OwnerIDAttr and such
-		if err := createNode(
-			spaceRoot,
-			&userv1beta1.UserId{
-				OpaqueId: owner.GetId().GetOpaqueId(),
-			},
-		); err != nil {
+		var ino uint64
+		// get the inode
+		ino, err := fs.GetInodeByPath(ctx, spaceRoot.InternalPath())
+		if (err != nil) || (ino == 0) {
+			return nil, errors.Wrap(err, "posixfs: error getting inode")
+		}
+
+		metadata := make(map[string][]byte)
+		metadata[ownerIDAttr] = []byte(owner.Id.OpaqueId)
+		metadata[ownerIDPAttr] = []byte(owner.Id.Idp)
+
+		spaceRoot.id = fmt.Sprintf("%d:%s", ino, spaceID)
+		// try to store it
+		metadata[idAttr] = []byte(spaceRoot.id)
+
+		/*
+			ownerType := req.GetOwner().Id.GetType()
+			ownerIdp := req.GetOwner().Id.GetIdp()
+			if req.GetOwner() != nil && owner != nil {
+				// root.SetOwner(req.GetOwner().GetId())
+			} else {
+				// root.SetOwner(&userv1beta1.UserId{OpaqueId: spaceID, Type: userv1beta1.UserType_USER_TYPE_SPACE_OWNER})
+			}
+		*/
+		metadata[ownerTypeAttr] = []byte(utils.UserTypeToString(owner.GetId().Type))
+		// always mark the space root node as the end of propagation
+		metadata[prefixes.PropagationAttr] = []byte("1")
+		metadata[nameAttr] = []byte(owner.Username)
+		metadata[prefixes.SpaceNameAttr] = []byte(owner.Username)
+		metadata[prefixes.TreesizeAttr] = []byte("0")
+
+		if req.Type != "" {
+			metadata[prefixes.SpaceTypeAttr] = []byte(req.Type)
+		}
+
+		if description != "" {
+			metadata[prefixes.SpaceDescriptionAttr] = []byte(description)
+		}
+
+		if err := spaceRoot.writeMetadataMap(metadata); err != nil {
 			return nil, err
 		}
-	}
-
-	// now the directory exists in any case. Read the node and return the space type.
-
-	/*
-		ownerType := req.GetOwner().Id.GetType()
-		ownerIdp := req.GetOwner().Id.GetIdp()
-		if req.GetOwner() != nil && owner != nil {
-			// root.SetOwner(req.GetOwner().GetId())
-		} else {
-			// root.SetOwner(&userv1beta1.UserId{OpaqueId: spaceID, Type: userv1beta1.UserType_USER_TYPE_SPACE_OWNER})
-		}
-	*/
-	metadata := make(map[string][]byte)
-	metadata[prefixes.OwnerTypeAttr] = []byte(utils.UserTypeToString(owner.GetId().Type))
-	// always mark the space root node as the end of propagation
-	metadata[prefixes.PropagationAttr] = []byte("1")
-	metadata[prefixes.NameAttr] = []byte(req.Name)
-	metadata[prefixes.SpaceNameAttr] = []byte(req.Name)
-	metadata[prefixes.TreesizeAttr] = []byte("0")
-
-	if req.Type != "" {
-		metadata[prefixes.SpaceTypeAttr] = []byte(req.Type)
-	}
-
-	if description != "" {
-		metadata[prefixes.SpaceDescriptionAttr] = []byte(description)
-	}
-
-	if err := spaceRoot.writeMetadataMap(metadata); err != nil {
-		return nil, err
 	}
 
 	// Write index
@@ -193,6 +215,21 @@ func (fs *posixfs) CreateStorageSpace(ctx context.Context, req *provider.CreateS
 		}
 	}
 	space, err := fs.storageSpaceFromNode(ctx, spaceRoot, true)
+	if (err != nil) || (space == nil) {
+		return nil, err
+	}
+
+	space.SpaceType = req.Type
+	var mdKeys []string
+
+	rp, err := fs.p.AssemblePermissions(ctx, spaceRoot)
+	switch {
+	case err != nil:
+		return nil, err
+
+	}
+
+	space.RootInfo, err = spaceRoot.AsResourceInfo(ctx, rp, mdKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -219,8 +256,131 @@ func (fs *posixfs) DeleteStorageSpace(ctx context.Context, req *provider.DeleteS
 // The spaceid is a concatenation of storageid + "!" + nodeid
 func (fs *posixfs) ListStorageSpaces(ctx context.Context, filter []*provider.ListStorageSpacesRequest_Filter, unrestricted bool) ([]*provider.StorageSpace, error) {
 	// TODO check filters
-	return nil, errtypes.NotSupported("posixfs: not implemented ListStorageSpaces")
+	var (
+		spaceID       = spaceIDAny
+		nodeID        = spaceIDAny
+		requestedUser *userv1beta1.UserId
+	)
 
+	log := logger.New()
+	spaceTypes := map[string]struct{}{}
+
+	for i := range filter {
+		switch filter[i].Type {
+		case provider.ListStorageSpacesRequest_Filter_TYPE_SPACE_TYPE:
+			switch filter[i].GetSpaceType() {
+			case "+mountpoint":
+				// TODO include mount poits
+			case "+grant":
+				// TODO include grants
+			default:
+				spaceTypes[filter[i].GetSpaceType()] = struct{}{}
+			}
+		case provider.ListStorageSpacesRequest_Filter_TYPE_ID:
+			_, spaceID, nodeID, _ = storagespace.SplitID(filter[i].GetId().OpaqueId)
+			if strings.Contains(nodeID, "/") {
+				return []*provider.StorageSpace{}, nil
+			}
+		case provider.ListStorageSpacesRequest_Filter_TYPE_USER:
+			// TODO: refactor this to GetUserId() in cs3
+			requestedUser = filter[i].GetUser()
+		case provider.ListStorageSpacesRequest_Filter_TYPE_OWNER:
+			// TODO: improve further by not evaluating shares
+			requestedUser = filter[i].GetOwner()
+		}
+	}
+	if len(spaceTypes) == 0 {
+		spaceTypes[spaceTypeAny] = struct{}{}
+	}
+
+	log.Debug().Str("RequestedUserID", requestedUser.GetOpaqueId()).Msg("ListStorageSpaces")
+	// authenticatedUserID := ctxpkg.ContextMustGetUser(ctx).GetId().GetOpaqueId()
+
+	// Checks for permissions to list spaces of other users
+	// if !fs.p.ListSpacesOfUser(ctx, requestedUserID) {
+	//	return nil, errtypes.PermissionDenied(fmt.Sprintf("user %s is not allowed to list spaces of other users", authenticatedUserID))
+	// }
+
+	// checkNodePermissions := fs.MustCheckNodePermissions(ctx, unrestricted)
+
+	spaces := []*provider.StorageSpace{}
+
+	if spaceID != spaceIDAny && nodeID != spaceIDAny {
+		// try directly reading the node
+		n, err := ReadNode(ctx, fs.lu, spaceID, nodeID) // permission to read disabled space is checked later
+		if err != nil {
+			log.Error().Err(err).Str("id", nodeID).Msg("could not read node")
+			return nil, err
+		}
+		if !n.Exists {
+			// return empty list
+			return spaces, nil
+		}
+		space, err := fs.storageSpaceFromNode(ctx, n, true)
+		if err != nil {
+			return nil, err
+		}
+		// filter space types
+		_, ok1 := spaceTypes[spaceTypeAny]
+		_, ok2 := spaceTypes[space.SpaceType]
+		if ok1 || ok2 {
+			spaces = append(spaces, space)
+		}
+		// TODO: filter user id
+		return spaces, nil
+	}
+
+	if requestedUser != nil {
+		if _, ok := spaceTypes[spaceTypeAny]; ok {
+			// TODO do not hardcode dirs
+			spaceTypes = map[string]struct{}{
+				"personal": {},
+				"project":  {},
+				"share":    {},
+			}
+		}
+
+		if _, ok := spaceTypes[_spaceTypePersonal]; ok {
+			userId := requestedUser.GetOpaqueId()
+
+			persDir := filepath.Join(fs.lu.Options.Root, _spaceTypePersonal)
+			entries, err := os.ReadDir(persDir)
+
+			if err != nil {
+				log.Error().Err(err).Str("dir", persDir).Msg("could not read dir")
+			}
+
+			const ownerId = "user.posix.owner.id"
+			for _, e := range entries {
+				xattr, err := xattr.Get(filepath.Join(persDir, e.Name()), ownerId)
+				if err != nil {
+					log.Error().Err(err).Str("dir", persDir).Msg("could not read dir")
+				} else {
+					if string(xattr) == userId {
+						// found the personal space
+						spaceRoot := &Node{lu: fs.lu, SpaceID: spaceID, owner: requestedUser, Dir: "personal", Name: "einstein"}
+						n := &Node{lu: fs.lu, SpaceID: spaceID, id: userId, SpaceRoot: spaceRoot, Name: "einstein", Dir: "personal"}
+
+						space, err := fs.storageSpaceFromNode(ctx, n, false)
+						if err != nil {
+							return nil, err
+						}
+						space.SpaceType = _spaceTypePersonal
+
+						spaces = append(spaces, space)
+						break
+					}
+				}
+			}
+			// look for the personal space
+			// find the dir that matches the name personal/<ownername>
+			// oname := requestedUser.GetUsername()
+
+		}
+
+	}
+
+	return spaces, nil
 }
 
 func (fs *posixfs) UpdateStorageSpace(ctx context.Context, req *provider.UpdateStorageSpaceRequest) (*provider.UpdateStorageSpaceResponse, error) {

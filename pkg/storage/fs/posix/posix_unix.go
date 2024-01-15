@@ -41,3 +41,20 @@ func (fs *posixfs) GetQuota(ctx context.Context, ref *provider.Reference) (uint6
 	var have_no_idea_what_it_is uint64
 	return total, used, have_no_idea_what_it_is, nil
 }
+
+func (fs *posixfs) GetInodeByPath(ctx context.Context, p string) (uint64, error) {
+	stat := syscall.Stat_t{}
+	err := syscall.Stat(p, &stat)
+	if err != nil {
+		return 0, err
+	}
+	return stat.Ino, nil
+}
+
+func (fs *posixfs) GetInode(ctx context.Context, ref *provider.Reference) (uint64, error) {
+	node, err := fs.lu.NodeFromResource(ctx, ref)
+	if err != nil {
+		return 0, err
+	}
+	return fs.GetInodeByPath(ctx, node.InternalPath())
+}

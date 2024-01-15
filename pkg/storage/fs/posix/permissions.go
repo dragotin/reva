@@ -74,7 +74,7 @@ func (p *Permissions) AssemblePermissions(ctx context.Context, n *Node) (ap *pro
 	u := ctxpkg.ContextMustGetUser(ctx)
 
 	// check if the current user is the owner
-	o, err := n.Owner()
+	o := n.Owner()
 	if err != nil {
 		// TODO check if a parent folder has the owner set?
 		appctx.GetLogger(ctx).Error().Err(err).Interface("node", n).Msg("could not determine owner, returning default permissions")
@@ -230,11 +230,8 @@ func (p *Permissions) getUserAndPermissions(ctx context.Context, n *Node) (*user
 	u := ctxpkg.ContextMustGetUser(ctx)
 
 	// check if the current user is the owner
-	o, err := n.Owner()
-	if err != nil {
-		appctx.GetLogger(ctx).Error().Err(err).Interface("node", n).Msg("could not determine owner, returning default permissions")
-		return nil, noPermissions
-	}
+	o := n.Owner()
+
 	if o.OpaqueId == "" {
 		// this happens for root nodes in the storage. the extended attributes are set to emptystring to indicate: no owner
 		// TODO what if no owner is set but grants are present?

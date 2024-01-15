@@ -53,7 +53,7 @@ func (lu *Lookup) NodeFromPath(ctx context.Context, fn string) (node *Node, err 
 	log.Debug().Interface("fn", fn).Msg("NodeFromPath()")
 
 	if node, err = lu.HomeOrRootNode(ctx); err != nil {
-		return
+		return nil, err
 	}
 
 	// TODO collect permissions of the current user on every segment
@@ -72,7 +72,12 @@ func (lu *Lookup) NodeFromID(ctx context.Context, id *provider.ResourceId) (n *N
 	if id == nil || id.OpaqueId == "" {
 		return nil, fmt.Errorf("invalid resource id %+v", id)
 	}
-	return ReadNode(ctx, lu, id.OpaqueId)
+	parts := strings.SplitN(id.OpaqueId, ":", 2)
+	if len(parts) != 2 {
+		return nil, errtypes.BadRequest("invalid file id")
+	}
+
+	return ReadNode(ctx, lu, parts[0], parts[1])
 }
 
 // Path returns the relative external path for node
@@ -115,7 +120,8 @@ func (lu *Lookup) HomeNode(ctx context.Context) (node *Node, err error) {
 	if node, err = lu.RootNode(ctx); err != nil {
 		return
 	}
-	node, err = lu.WalkPath(ctx, node, lu.mustGetUserLayout(ctx), nil)
+	lum := lu.mustGetUserLayout(ctx)
+	node, err = lu.WalkPath(ctx, node, lum, nil)
 	return
 }
 

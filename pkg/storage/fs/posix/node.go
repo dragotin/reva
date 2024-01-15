@@ -114,16 +114,13 @@ func ReadRecycleItem(ctx context.Context, lu *Lookup, key string) (n *Node, tras
 }
 
 // ReadNode creates a new instance from an id and checks if it exists
-func ReadNode(ctx context.Context, lu *Lookup, id string) (n *Node, err error) {
+// nodeId is the inode
+func ReadNode(ctx context.Context, lu *Lookup, spaceId string, nodeId string) (n *Node, err error) {
 	n = &Node{
 		lu: lu,
 	}
-	parts := strings.SplitN(id, ":", 2)
-	if len(parts) != 2 {
-		return nil, errtypes.BadRequest("invalid file id")
-	}
 
-	command := []string{"find", filepath.Join(lu.Options.Root), "-inum", parts[0]}
+	command := []string{"find", filepath.Join(lu.Options.Root), "-inum", nodeId}
 	out, err := exec.Command(command[0], command[1:]...).Output()
 	if err != nil {
 		return nil, errtypes.InternalError(err.Error())
@@ -133,11 +130,11 @@ func ReadNode(ctx context.Context, lu *Lookup, id string) (n *Node, err error) {
 	path := string(out)
 	n.Dir, n.Name = filepath.Split(path)
 
-	if id != n.ID() {
+	if nodeId != n.ID() {
 		// TODO if not check if the id or the inode matches?
 		log.Debug().Interface("node", n).Msg("id mismatch")
 		n.Exists = false // return not existing node
-		return &Node{id: id, lu: lu}, nil
+		return &Node{id: nodeId, lu: lu}, nil
 	}
 
 	return n, nil // swallow mismatch
@@ -176,44 +173,15 @@ func (n *Node) Parent() (p *Node, err error) {
 
 // Owner returns the cached owner id or reads it from the extended attributes
 // TODO can be private as only the AsResourceInfo uses it
-func (n *Node) Owner() (o *userpb.UserId, err error) {
-	if n.owner != nil {
-		return n.owner, nil
-	}
-
-	// FIXME ... do we return the owner of the reference or the owner of the target?
-	// we don't really know the owner of the target ... and as the reference may point anywhere we cannot really find out
-	// but what are the permissions? all? none? the gateway has to fill in?
-	// TODO what if this is a reference?
-	nodePath := n.InternalPath()
-	// lookup parent id in extended attributes
-	var attrBytes []byte
-	// lookup name in extended attributes
-	if attrBytes, err = xattr.Get(nodePath, ownerIDAttr); err == nil {
-		if n.owner == nil {
-			n.owner = &userpb.UserId{}
-		}
-		n.owner.OpaqueId = string(attrBytes)
-	} else {
-		return
-	}
-	// lookup name in extended attributes
-	if attrBytes, err = xattr.Get(nodePath, ownerIDPAttr); err == nil {
-		if n.owner == nil {
-			n.owner = &userpb.UserId{}
-		}
-		n.owner.Idp = string(attrBytes)
-	} else {
-		return
-	}
-	return n.owner, err
+func (n *Node) Owner() (o *userpb.UserId) {
+	return n.SpaceRoot.owner
 }
 
 // PermissionSet returns the permission set for the current user
 // the parent nodes are not taken into account
 func (n *Node) PermissionSet(ctx context.Context) *provider.ResourcePermissions {
 	u := ctxpkg.ContextMustGetUser(ctx)
-	if o, _ := n.Owner(); isSameUserID(u.Id, o) {
+	if o := n.Owner(); isSameUserID(u.Id, o) {
 		return ownerPermissions
 	}
 	// read the permissions for the current user from the acls of the current node
@@ -346,10 +314,7 @@ func (n *Node) AsResourceInfo(ctx context.Context, rp *provider.ResourcePermissi
 
 	id := &provider.ResourceId{OpaqueId: n.ID()}
 
-	fn, err = n.lu.Path(ctx, n)
-	if err != nil {
-		return nil, err
-	}
+	fn = filepath.Join(n.Dir, n.Name) //  n.lu.Path(ctx, n)
 
 	ri = &provider.ResourceInfo{
 		Id:            id,
@@ -358,11 +323,8 @@ func (n *Node) AsResourceInfo(ctx context.Context, rp *provider.ResourcePermissi
 		MimeType:      mime.Detect(nodeType == provider.ResourceType_RESOURCE_TYPE_CONTAINER, fn),
 		Size:          uint64(fi.Size()),
 		Target:        string(target),
+		Owner:         n.Owner(),
 		PermissionSet: rp,
-	}
-
-	if ri.Owner, err = n.Owner(); err != nil {
-		sublog.Debug().Err(err).Msg("could not determine owner")
 	}
 
 	// TODO make etag of files use fileid and checksum
@@ -550,12 +512,7 @@ func (n *Node) UnsetTempEtag() (err error) {
 // ReadUserPermissions will assemble the permissions for the current user on the given node without parent nodes
 func (n *Node) ReadUserPermissions(ctx context.Context, u *userpb.User) (ap *provider.ResourcePermissions, err error) {
 	// check if the current user is the owner
-	o, err := n.Owner()
-	if err != nil {
-		// TODO check if a parent folder has the owner set?
-		appctx.GetLogger(ctx).Error().Err(err).Interface("node", n).Msg("could not determine owner, returning default permissions")
-		return noPermissions, err
-	}
+	o := n.Owner()
 	if o.OpaqueId == "" {
 		// this happens for root nodes in the storage. the extended attributes are set to emptystring to indicate: no owner
 		// TODO what if no owner is set but grants are present?

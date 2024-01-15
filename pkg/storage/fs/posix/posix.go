@@ -24,7 +24,6 @@ import (
 	"strings"
 
 	userpb "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
-	userv1beta1 "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
 	"github.com/cs3org/reva/v2/pkg/appctx"
 	"github.com/cs3org/reva/v2/pkg/errtypes"
@@ -50,11 +49,13 @@ const (
 	// collisions with other apps We are going to introduce a sub namespace
 	// "user.posix."
 
-	posixPrefix  string = "user.posix."
-	idAttr       string = posixPrefix + "id"
-	parentidAttr string = posixPrefix + "parentid"
-	ownerIDAttr  string = posixPrefix + "owner.id"
-	ownerIDPAttr string = posixPrefix + "owner.idp"
+	posixPrefix   string = "user.posix."
+	idAttr        string = posixPrefix + "id"
+	parentidAttr  string = posixPrefix + "parentid"
+	ownerIDAttr   string = posixPrefix + "owner.id"
+	ownerIDPAttr  string = posixPrefix + "owner.idp"
+	ownerTypeAttr string = posixPrefix + "owner.type"
+
 	// the base name of the node
 	// updated when the file is renamed or moved
 	nameAttr string = posixPrefix + "name"
@@ -86,8 +87,6 @@ const (
 	// user.posix.propagation=1 is set
 	//treesizeAttr string = posixPrefix + "treesize"
 
-	_spaceTypePersonal = "personal"
-	_spaceTypeProject  = "project"
 )
 
 func init() {
@@ -105,7 +104,7 @@ func parseConfig(m map[string]interface{}) (*Options, error) {
 
 func (o *Options) init(m map[string]interface{}) {
 	if o.UserLayout == "" {
-		o.UserLayout = "{{.Id.OpaqueId}}"
+		o.UserLayout = "personal/{{.Username}}"
 	}
 	// ensure user layout has no starting or trailing /
 	o.UserLayout = strings.Trim(o.UserLayout, "/")
@@ -118,6 +117,9 @@ func (o *Options) init(m map[string]interface{}) {
 
 	// c.DataDirectory should never end in / unless it is the root
 	o.Root = filepath.Clean(o.Root)
+
+	// any indicator if it was set in a config?
+	o.EnableHome = true
 }
 
 // New returns an implementation to of the storage.FS interface that talk to
@@ -131,17 +133,6 @@ func New(m map[string]interface{}, _ events.Stream) (storage.FS, error) {
 
 	lu := &Lookup{
 		Options: o,
-	}
-
-	// the root node has an empty name
-	// the root node has no parent
-	if err = createNode(
-		&Node{lu: lu, id: "root"},
-		&userv1beta1.UserId{
-			OpaqueId: o.Owner,
-		},
-	); err != nil {
-		return nil, err
 	}
 
 	tp, err := NewTree(lu)
@@ -195,6 +186,7 @@ func (fs *posixfs) CreateHome(ctx context.Context) (err error) {
 	// update the owner
 	u := ctxpkg.ContextMustGetUser(ctx)
 	h.owner = u.Id
+	// FIXME: Use CreateStorageSpace instead
 	if err = h.writeMetadata(); err != nil {
 		return
 	}

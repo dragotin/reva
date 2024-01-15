@@ -86,10 +86,7 @@ func (t *Tree) CreateDir(ctx context.Context, node *Node) (err error) {
 		return
 	}
 	var owner *userpb.UserId
-	owner, err = p.Owner()
-	if err != nil {
-		return
-	}
+	owner = p.Owner()
 
 	return createNode(node, owner)
 }
