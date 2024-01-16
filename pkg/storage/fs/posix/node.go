@@ -425,9 +425,7 @@ func (n *Node) AsResourceInfo(ctx context.Context, rp *provider.ResourcePermissi
 		Metadata: metadata,
 	}
 
-	sublog.Debug().
-		Interface("ri", ri).
-		Msg("AsResourceInfo")
+	// sublog.Debug().Interface("ri", ri).Msg("AsResourceInfo")
 
 	return ri, nil
 }

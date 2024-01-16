@@ -134,7 +134,7 @@ func (fs *posixfs) CreateStorageSpace(ctx context.Context, req *provider.CreateS
 
 	spaceRoot := &Node{lu: fs.lu, SpaceID: spaceID, owner: owner.GetId(), Dir: "personal", Name: "einstein"}
 
-	spaceRoot.SpaceRoot = spaceRoot
+	spaceRoot.SpaceRoot = &Node{lu: fs.lu, SpaceID: spaceID, owner: owner.GetId(), Dir: "personal", Name: "einstein"}
 
 	// if the root dir exists, it can be assumed that the space already exists
 	if _, err := os.Stat(spaceRoot.InternalPath()); os.IsNotExist(err) {
@@ -350,16 +350,18 @@ func (fs *posixfs) ListStorageSpaces(ctx context.Context, filter []*provider.Lis
 				log.Error().Err(err).Str("dir", persDir).Msg("could not read dir")
 			}
 
-			const ownerId = "user.posix.owner.id"
+			const FileOwnerId = "user.posix.owner.id"
+			const FileSpaceId = "user.posix.id"
 			for _, e := range entries {
-				xattr, err := xattr.Get(filepath.Join(persDir, e.Name()), ownerId)
-				if err != nil {
+				fileOwnerId, err1 := xattr.Get(filepath.Join(persDir, e.Name()), FileOwnerId)
+				fileSpaceId, err2 := xattr.Get(filepath.Join(persDir, e.Name()), FileSpaceId)
+				if err1 != nil || err2 != nil {
 					log.Error().Err(err).Str("dir", persDir).Msg("could not read dir")
 				} else {
-					if string(xattr) == userId {
+					if string(fileOwnerId) == userId {
 						// found the personal space
-						spaceRoot := &Node{lu: fs.lu, SpaceID: spaceID, owner: requestedUser, Dir: "personal", Name: "einstein"}
-						n := &Node{lu: fs.lu, SpaceID: spaceID, id: userId, SpaceRoot: spaceRoot, Name: "einstein", Dir: "personal"}
+						spaceRoot := &Node{lu: fs.lu, id: string(fileSpaceId), owner: requestedUser, Dir: "personal", Name: "einstein"}
+						n := &Node{lu: fs.lu, SpaceID: string(fileSpaceId), id: userId, SpaceRoot: spaceRoot, Name: "einstein", Dir: "personal"}
 
 						space, err := fs.storageSpaceFromNode(ctx, n, false)
 						if err != nil {
