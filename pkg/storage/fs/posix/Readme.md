@@ -16,3 +16,18 @@ It has to make several tradeoffs:
   - we could use rcs for individual files or git/svn/cvs for folders ... 
 
 - probably more
+
+## Storage Layouts and Ids
+
+Every resource in the posix driver is supposed to have the following Ids in the xattrs:
+
+user.posix.id: <Id> The resource Id of the space
+user.posix.spaceid: <Id> The space Id of the resource
+
+The <Id> consists of the inode and a UUID, delimited by a colon. 
+Example: user.posix.id="184179045:4c510ada-c86b-4815-8820-42cdf82c3d51"
+
+
+
+
+For space Roots, both ids are identical.

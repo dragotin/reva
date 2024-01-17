@@ -51,6 +51,7 @@ const (
 
 	posixPrefix   string = "user.posix."
 	idAttr        string = posixPrefix + "id"
+	spaceIdAttr   string = posixPrefix + "spaceid"
 	parentidAttr  string = posixPrefix + "parentid"
 	ownerIDAttr   string = posixPrefix + "owner.id"
 	ownerIDPAttr  string = posixPrefix + "owner.idp"
@@ -104,7 +105,7 @@ func parseConfig(m map[string]interface{}) (*Options, error) {
 
 func (o *Options) init(m map[string]interface{}) {
 	if o.UserLayout == "" {
-		o.UserLayout = "personal/{{.Username}}"
+		o.UserLayout = "users/{{.Username}}"
 	}
 	// ensure user layout has no starting or trailing /
 	o.UserLayout = strings.Trim(o.UserLayout, "/")

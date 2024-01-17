@@ -16,6 +16,7 @@
 package posix
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -156,6 +157,7 @@ func (fs *posixfs) CreateStorageSpace(ctx context.Context, req *provider.CreateS
 		spaceRoot.id = fmt.Sprintf("%d:%s", ino, spaceID)
 		// try to store it
 		metadata[idAttr] = []byte(spaceRoot.id)
+		metadata[spaceIdAttr] = []byte(spaceRoot.id)
 
 		/*
 			ownerType := req.GetOwner().Id.GetType()
@@ -350,18 +352,21 @@ func (fs *posixfs) ListStorageSpaces(ctx context.Context, filter []*provider.Lis
 				log.Error().Err(err).Str("dir", persDir).Msg("could not read dir")
 			}
 
-			const FileOwnerId = "user.posix.owner.id"
-			const FileSpaceId = "user.posix.id"
 			for _, e := range entries {
-				fileOwnerId, err1 := xattr.Get(filepath.Join(persDir, e.Name()), FileOwnerId)
-				fileSpaceId, err2 := xattr.Get(filepath.Join(persDir, e.Name()), FileSpaceId)
+				fileId, err1 := xattr.Get(filepath.Join(persDir, e.Name()), idAttr)
+				fileSpaceId, err2 := xattr.Get(filepath.Join(persDir, e.Name()), spaceIdAttr)
 				if err1 != nil || err2 != nil {
 					log.Error().Err(err).Str("dir", persDir).Msg("could not read dir")
 				} else {
-					if string(fileOwnerId) == userId {
+					// split id which consists of <inode>:<uuid>
+					partsFileId := bytes.Split(fileId, []byte(":"))
+
+					if string(partsFileId[1]) == userId && bytes.Equal(fileId, fileSpaceId) {
 						// found the personal space
-						spaceRoot := &Node{lu: fs.lu, id: string(fileSpaceId), owner: requestedUser, Dir: "personal", Name: "einstein"}
-						n := &Node{lu: fs.lu, SpaceID: string(fileSpaceId), id: userId, SpaceRoot: spaceRoot, Name: "einstein", Dir: "personal"}
+						spaceRoot := &Node{lu: fs.lu, id: string(fileSpaceId), SpaceID: string(fileSpaceId),
+							owner: requestedUser, Dir: "personal", Name: "einstein"}
+						n := &Node{lu: fs.lu, SpaceID: string(fileSpaceId), id: userId, SpaceRoot: spaceRoot,
+							owner: requestedUser, Name: "einstein", Dir: "personal"}
 
 						space, err := fs.storageSpaceFromNode(ctx, n, false)
 						if err != nil {
@@ -374,10 +379,6 @@ func (fs *posixfs) ListStorageSpaces(ctx context.Context, filter []*provider.Lis
 					}
 				}
 			}
-			// look for the personal space
-			// find the dir that matches the name personal/<ownername>
-			// oname := requestedUser.GetUsername()
-
 		}
 
 	}
