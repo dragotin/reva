@@ -35,49 +35,55 @@ type Lookup struct {
 
 // NodeFromResource takes in a request path or request id and converts it to a Node
 func (lu *Lookup) NodeFromResource(ctx context.Context, ref *provider.Reference) (*Node, error) {
-	if ref.GetPath() != "" {
-		return lu.NodeFromPath(ctx, ref.GetPath())
-	}
 
-	if ref.GetResourceId() != nil {
-		return lu.NodeFromID(ctx, ref.GetResourceId())
+	if ref.ResourceId != nil {
+		// check if a storage space reference is used
+		// currently, the decomposed fs uses the root node id as the space id
+		n, err := lu.NodeFromID(ctx, ref.ResourceId)
+		if err != nil {
+			return nil, err
+		}
+		// is this a relative reference?
+		if ref.Path != "" {
+			p := filepath.Clean(ref.Path)
+			if p != "." && p != "/" {
+				// walk the relative path
+				n, err = lu.WalkPath(ctx, n, p, func(ctx context.Context, n *Node) error { return nil })
+				if err != nil {
+					return nil, err
+				}
+				n.SpaceID = ref.ResourceId.SpaceId
+			}
+		}
+		return n, nil
 	}
 
 	// reference is invalid
-	return nil, fmt.Errorf("invalid reference %+v", ref)
-}
+	return nil, fmt.Errorf("invalid reference %+v. resource_id must be set", ref)
 
-// NodeFromPath converts a filename into a Node
-func (lu *Lookup) NodeFromPath(ctx context.Context, fn string) (node *Node, err error) {
-	log := appctx.GetLogger(ctx)
-	log.Debug().Interface("fn", fn).Msg("NodeFromPath()")
-
-	if node, err = lu.HomeOrRootNode(ctx); err != nil {
-		return nil, err
-	}
-
-	// TODO collect permissions of the current user on every segment
-	if fn != "/" {
-		node, err = lu.WalkPath(ctx, node, fn, func(ctx context.Context, n *Node) error {
-			log.Debug().Interface("node", n).Msg("NodeFromPath() walk")
-			return nil
-		})
-	}
-
-	return
 }
 
 // NodeFromID returns the internal path for the id
 func (lu *Lookup) NodeFromID(ctx context.Context, id *provider.ResourceId) (n *Node, err error) {
-	if id == nil || id.OpaqueId == "" {
+	if id == nil {
 		return nil, fmt.Errorf("invalid resource id %+v", id)
 	}
-	parts := strings.SplitN(id.OpaqueId, ":", 2)
-	if len(parts) != 2 {
-		return nil, errtypes.BadRequest("invalid file id")
+	if id.OpaqueId == "" {
+		// The Resource references the root of a space
+		return lu.NodeFromSpaceID(ctx, id.SpaceId)
+	}
+	return ReadNode(ctx, lu, id.SpaceId, id.OpaqueId, nil)
+}
+
+// NodeFromSpaceID converts a resource id into a Node
+func (lu *Lookup) NodeFromSpaceID(ctx context.Context, spaceID string) (n *Node, err error) {
+	node, err := ReadNode(ctx, lu, spaceID, spaceID, nil)
+	if err != nil {
+		return nil, err
 	}
 
-	return ReadNode(ctx, lu, parts[0], parts[1])
+	node.SpaceRoot = node
+	return node, nil
 }
 
 // Path returns the relative external path for node

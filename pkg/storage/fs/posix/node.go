@@ -16,6 +16,7 @@
 package posix
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
@@ -113,14 +114,63 @@ func ReadRecycleItem(ctx context.Context, lu *Lookup, key string) (n *Node, tras
 	return nil, "", "", "", errtypes.NotSupported("ReadRecycleItem")
 }
 
+// ReadSpaceNode reads in the spaces directory directly and returns a node
+func ReadSpaceNode(ctx context.Context, lu *Lookup, spaceID string) (n *Node, err error) {
+
+	persDir := filepath.Join(lu.Options.Root, _personalSpaceRoot)
+	entries, err := os.ReadDir(persDir)
+
+	if err != nil {
+		log.Error().Err(err).Str("dir", persDir).Msg("could not read dir")
+	}
+
+	// Lookup personal spaces, project spaces TODO
+	for _, e := range entries {
+		fileId, err1 := xattr.Get(filepath.Join(persDir, e.Name()), idAttr)
+		fileSpaceId, err2 := xattr.Get(filepath.Join(persDir, e.Name()), spaceIdAttr)
+		if err1 != nil || err2 != nil {
+			log.Error().Err(err).Str("dir", persDir).Msg("could not read dir")
+		} else {
+			if string(fileId) == spaceID && bytes.Equal(fileId, fileSpaceId) {
+				// found the personal space
+				spaceRoot := &Node{lu: lu, id: string(fileSpaceId), SpaceID: string(fileSpaceId),
+					Dir: _personalSpaceRoot, Name: "einstein", Exists: true}
+				n := &Node{lu: lu, SpaceID: string(fileSpaceId), id: string(fileSpaceId), SpaceRoot: spaceRoot,
+					Dir: _personalSpaceRoot, Name: "einstein", Exists: true}
+				return n, nil
+			}
+		}
+	}
+	return nil, errtypes.NotFound("space not found")
+}
+
 // ReadNode creates a new instance from an id and checks if it exists
 // nodeId is the inode
-func ReadNode(ctx context.Context, lu *Lookup, spaceId string, nodeId string) (n *Node, err error) {
-	n = &Node{
+func ReadNode(ctx context.Context, lu *Lookup, spaceId, nodeId string, spaceRoot *Node) (*Node, error) {
+	n := &Node{
 		lu: lu,
 	}
 
-	command := []string{"find", filepath.Join(lu.Options.Root), "-inum", nodeId}
+	var err error
+
+	if spaceRoot == nil {
+		// read space root
+		spaceRoot, err = ReadSpaceNode(ctx, lu, spaceId)
+		if err != nil {
+			return nil, err
+		}
+		if nodeId == spaceId {
+			return spaceRoot, nil
+		}
+	}
+
+	// get the inode from the node ID
+	s := strings.Split(nodeId, ":")
+	if len(s) < 2 {
+		return nil, errtypes.PartialContent("nodeId must be in the format inode:id")
+	}
+
+	command := []string{"find", filepath.Join(lu.Options.Root), "-inum", s[0]}
 	out, err := exec.Command(command[0], command[1:]...).Output()
 	if err != nil {
 		return nil, errtypes.InternalError(err.Error())
@@ -129,6 +179,8 @@ func ReadNode(ctx context.Context, lu *Lookup, spaceId string, nodeId string) (n
 	// TODO check we only got one path?
 	path := string(out)
 	n.Dir, n.Name = filepath.Split(path)
+	n.SpaceRoot = spaceRoot
+	n.Exists = true
 
 	if nodeId != n.ID() {
 		// TODO if not check if the id or the inode matches?
@@ -191,8 +243,11 @@ func (n *Node) PermissionSet(ctx context.Context) *provider.ResourcePermissions 
 	return noPermissions
 }
 
-// calculateEtag returns a hash of fileid + tmtime (or mtime)
-func calculateEtag(nodeID string, tmTime time.Time) (string, error) {
+// GetAvailableSize returns the
+
+// CalculateEtag returns a hash of fileid + tmtime (or mtime)
+func (n *Node) CalculateEtag(tmTime time.Time) (string, error) {
+	nodeID := n.ID()
 	h := md5.New()
 	if _, err := io.WriteString(h, nodeID); err != nil {
 		return "", err
@@ -242,7 +297,7 @@ func (n *Node) SetEtag(ctx context.Context, val string) (err error) {
 		tmTime = fi.ModTime()
 	}
 	var etag string
-	if etag, err = calculateEtag(n.ID(), tmTime); err != nil {
+	if etag, err = n.CalculateEtag(tmTime); err != nil {
 		return
 	}
 
@@ -338,7 +393,7 @@ func (n *Node) AsResourceInfo(ctx context.Context, rp *provider.ResourcePermissi
 	// use temporary etag if it is set
 	if b, err := xattr.Get(nodePath, tmpEtagAttr); err == nil {
 		ri.Etag = fmt.Sprintf(`"%x"`, string(b)) // TODO why do we convert string(b)? is the temporary etag stored as string? -> should we use bytes? use hex.EncodeToString?
-	} else if ri.Etag, err = calculateEtag(n.ID(), tmTime); err != nil {
+	} else if ri.Etag, err = n.CalculateEtag(tmTime); err != nil {
 		sublog.Debug().Err(err).Msg("could not calculate etag")
 	}
 

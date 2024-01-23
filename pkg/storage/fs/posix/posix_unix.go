@@ -32,7 +32,8 @@ func (fs *posixfs) GetQuota(ctx context.Context, ref *provider.Reference) (uint6
 	}
 
 	stat := syscall.Statfs_t{}
-	err = syscall.Statfs(node.InternalPath(), &stat)
+	file := node.InternalPath()
+	err = syscall.Statfs(file, &stat)
 	if err != nil {
 		return 0, 0, 0, err
 	}

@@ -264,45 +264,7 @@ func (fs *posixfs) CreateDir(ctx context.Context, ref *provider.Reference) (err 
 // TODO when home support is enabled should the "/Shares" folder still be listed?
 func (fs *posixfs) CreateReference(ctx context.Context, p string, targetURI *url.URL) (err error) {
 
-	p = strings.Trim(p, "/")
-	parts := strings.Split(p, "/")
-
-	if len(parts) != 2 {
-		return errtypes.PermissionDenied("posixfs: references must be a child of the share folder: share_folder=" + fs.o.ShareFolder + " path=" + p)
-	}
-
-	if parts[0] != strings.Trim(fs.o.ShareFolder, "/") {
-		return errtypes.PermissionDenied("posixfs: cannot create references outside the share folder: share_folder=" + fs.o.ShareFolder + " path=" + p)
-	}
-
-	// create Shares folder if it does not exist
-	var n *Node
-	if n, err = fs.lu.NodeFromPath(ctx, fs.o.ShareFolder); err != nil {
-		return errtypes.InternalError(err.Error())
-	} else if !n.Exists {
-		if err = fs.tp.CreateDir(ctx, n); err != nil {
-			return
-		}
-	}
-
-	if n, err = n.Child(parts[1]); err != nil {
-		return errtypes.InternalError(err.Error())
-	}
-
-	if n.Exists {
-		// TODO append increasing number to mountpoint name
-		return errtypes.AlreadyExists(p)
-	}
-
-	if err = fs.tp.CreateDir(ctx, n); err != nil {
-		return
-	}
-
-	internal := n.InternalPath()
-	if err = xattr.Set(internal, referenceAttr, []byte(targetURI.String())); err != nil {
-		return errors.Wrapf(err, "posixfs: error setting the target %s on the reference file %s", targetURI.String(), internal)
-	}
-	return nil
+	return errtypes.NotSupported("Posixfs: CreateReference")
 }
 
 func (fs *posixfs) Move(ctx context.Context, oldRef, newRef *provider.Reference) (err error) {

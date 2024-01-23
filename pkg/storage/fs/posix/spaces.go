@@ -16,12 +16,13 @@
 package posix
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	userv1beta1 "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
@@ -45,12 +46,16 @@ const (
 	spaceTypeShare     = "share"
 	spaceTypeAny       = "*"
 	spaceIDAny         = "*"
+	_personalSpaceRoot = "users"
+	_projectSpaceRoot  = "projects"
 
 	quotaUnrestricted = 0
 )
 
 func (fs *posixfs) storageSpaceFromNode(ctx context.Context, n *Node, checkPermissions bool) (*provider.StorageSpace, error) {
 	// user := ctxpkg.ContextMustGetUser(ctx)
+	var err error
+
 	ssID, err := storagespace.FormatReference(
 		&provider.Reference{
 			ResourceId: &provider.ResourceId{
@@ -61,8 +66,22 @@ func (fs *posixfs) storageSpaceFromNode(ctx context.Context, n *Node, checkPermi
 	if err != nil {
 		return nil, err
 	}
-	var sname string
-	sname = n.Name
+
+	var sname, stype string
+
+	// get the space name
+	if name, lerr := xattr.Get(n.InternalPath(), prefixes.SpaceNameAttr); lerr != nil {
+		sname = string("unknown")
+	} else {
+		sname = string(name)
+	}
+
+	// space type string
+	if mytype, lerr := xattr.Get(n.InternalPath(), prefixes.SpaceTypeAttr); lerr != nil {
+		stype = string("unknown")
+	} else {
+		stype = string(mytype)
+	}
 
 	grantMapJSON := []byte("{}")
 	grantExpirationMapJSON := []byte("{}")
@@ -71,6 +90,10 @@ func (fs *posixfs) storageSpaceFromNode(ctx context.Context, n *Node, checkPermi
 	space := &provider.StorageSpace{
 		Opaque: &types.Opaque{
 			Map: map[string]*types.OpaqueEntry{
+				"spaceAlias": {
+					Decoder: "plain",
+					Value:   []byte(fmt.Sprintf("%s/%s", stype, sname)),
+				},
 				"grants": {
 					Decoder: "json",
 					Value:   grantMapJSON,
@@ -96,6 +119,47 @@ func (fs *posixfs) storageSpaceFromNode(ctx context.Context, n *Node, checkPermi
 		// SpaceType is read from xattr below
 		// Mtime is set either as node.tmtime or as fi.mtime below
 	}
+	// we set the space mtime to the root item mtime
+	// override the stat mtime with a tmtime if it is present
+	var tmtime time.Time
+	if tmt, err := n.GetTMTime(); err == nil {
+		tmtime = tmt
+		un := tmt.UnixNano()
+		space.Mtime = &types.Timestamp{
+			Seconds: uint64(un / 1000000000),
+			Nanos:   uint32(un % 1000000000),
+		}
+	} else if fi, err := os.Stat(n.InternalPath()); err == nil {
+		// fall back to stat mtime
+		tmtime = fi.ModTime()
+		un := fi.ModTime().UnixNano()
+		space.Mtime = &types.Timestamp{
+			Seconds: uint64(un / 1000000000),
+			Nanos:   uint32(un % 1000000000),
+		}
+	}
+
+	etag, err := n.CalculateEtag(tmtime)
+	if err != nil {
+		return nil, err
+	}
+	space.Opaque.Map["etag"] = &types.OpaqueEntry{
+		Decoder: "plain",
+		Value:   []byte(etag),
+	}
+
+	space.Quota = &provider.Quota{
+		QuotaMaxBytes: quotaUnrestricted,
+		QuotaMaxFiles: quotaUnrestricted, // TODO MaxUInt64? = unlimited? why even max files? 0 = unlimited?
+	}
+
+	var total uint64 = 0
+	var used uint64 = 0
+	var remaining uint64 = 0
+
+	space.Opaque = utils.AppendPlainToOpaque(space.Opaque, "quota.total", strconv.FormatUint(total, 10))
+	space.Opaque = utils.AppendPlainToOpaque(space.Opaque, "quota.used", strconv.FormatUint(used, 10))
+	space.Opaque = utils.AppendPlainToOpaque(space.Opaque, "quota.remaining", strconv.FormatUint(remaining, 10))
 
 	return space, nil
 }
@@ -133,9 +197,9 @@ func (fs *posixfs) CreateStorageSpace(ctx context.Context, req *provider.CreateS
 	//	return nil, err
 	// }
 
-	spaceRoot := &Node{lu: fs.lu, SpaceID: spaceID, owner: owner.GetId(), Dir: "personal", Name: "einstein"}
+	spaceRoot := &Node{lu: fs.lu, SpaceID: spaceID, owner: owner.GetId(), Dir: _personalSpaceRoot, Name: "einstein"}
 
-	spaceRoot.SpaceRoot = &Node{lu: fs.lu, SpaceID: spaceID, owner: owner.GetId(), Dir: "personal", Name: "einstein"}
+	spaceRoot.SpaceRoot = &Node{lu: fs.lu, SpaceID: spaceID, owner: owner.GetId(), Dir: _personalSpaceRoot, Name: "einstein"}
 
 	// if the root dir exists, it can be assumed that the space already exists
 	if _, err := os.Stat(spaceRoot.InternalPath()); os.IsNotExist(err) {
@@ -309,7 +373,7 @@ func (fs *posixfs) ListStorageSpaces(ctx context.Context, filter []*provider.Lis
 
 	if spaceID != spaceIDAny && nodeID != spaceIDAny {
 		// try directly reading the node
-		n, err := ReadNode(ctx, fs.lu, spaceID, nodeID) // permission to read disabled space is checked later
+		n, err := ReadNode(ctx, fs.lu, spaceID, nodeID, nil) // permission to read disabled space is checked later
 		if err != nil {
 			log.Error().Err(err).Str("id", nodeID).Msg("could not read node")
 			return nil, err
@@ -343,9 +407,7 @@ func (fs *posixfs) ListStorageSpaces(ctx context.Context, filter []*provider.Lis
 		}
 
 		if _, ok := spaceTypes[_spaceTypePersonal]; ok {
-			userId := requestedUser.GetOpaqueId()
-
-			persDir := filepath.Join(fs.lu.Options.Root, _spaceTypePersonal)
+			persDir := filepath.Join(fs.lu.Options.Root, _personalSpaceRoot)
 			entries, err := os.ReadDir(persDir)
 
 			if err != nil {
@@ -353,30 +415,26 @@ func (fs *posixfs) ListStorageSpaces(ctx context.Context, filter []*provider.Lis
 			}
 
 			for _, e := range entries {
-				fileId, err1 := xattr.Get(filepath.Join(persDir, e.Name()), idAttr)
 				fileSpaceId, err2 := xattr.Get(filepath.Join(persDir, e.Name()), spaceIdAttr)
-				if err1 != nil || err2 != nil {
+				if err2 != nil {
 					log.Error().Err(err).Str("dir", persDir).Msg("could not read dir")
 				} else {
 					// split id which consists of <inode>:<uuid>
-					partsFileId := bytes.Split(fileId, []byte(":"))
-
-					if string(partsFileId[1]) == userId && bytes.Equal(fileId, fileSpaceId) {
-						// found the personal space
-						spaceRoot := &Node{lu: fs.lu, id: string(fileSpaceId), SpaceID: string(fileSpaceId),
-							owner: requestedUser, Dir: "personal", Name: "einstein"}
-						n := &Node{lu: fs.lu, SpaceID: string(fileSpaceId), id: userId, SpaceRoot: spaceRoot,
-							owner: requestedUser, Name: "einstein", Dir: "personal"}
-
-						space, err := fs.storageSpaceFromNode(ctx, n, false)
-						if err != nil {
-							return nil, err
-						}
-						space.SpaceType = _spaceTypePersonal
-
-						spaces = append(spaces, space)
-						break
+					var spaceRoot *Node
+					if spaceRoot, err = ReadSpaceNode(ctx, fs.lu, string(fileSpaceId)); err != nil {
+						return nil, err
 					}
+					spaceRoot.owner = requestedUser
+					spaceRoot.SpaceRoot.owner = requestedUser
+
+					space, err := fs.storageSpaceFromNode(ctx, spaceRoot, false)
+					if err != nil {
+						return nil, err
+					}
+					space.SpaceType = _spaceTypePersonal
+
+					spaces = append(spaces, space)
+					break
 				}
 			}
 		}

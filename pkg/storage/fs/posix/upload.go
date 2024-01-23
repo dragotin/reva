@@ -197,7 +197,8 @@ func (fs *posixfs) NewUpload(ctx context.Context, info tusd.FileInfo) (upload tu
 	}
 	info.MetaData["dir"] = filepath.Clean(info.MetaData["dir"])
 
-	n, err := fs.lu.NodeFromPath(ctx, filepath.Join(info.MetaData["dir"], info.MetaData["filename"]))
+	var n *Node
+	// n, err := fs.lu.NodeFromPath(ctx, filepath.Join(info.MetaData["dir"], info.MetaData["filename"]))
 	if err != nil {
 		return nil, errors.Wrap(err, "posixfs: error wrapping filename")
 	}
